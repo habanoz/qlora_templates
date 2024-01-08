@@ -8,8 +8,9 @@ import uuid
 import shutil
 from os.path import exists, join, isdir
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Sequence, Any
+from typing import Optional, Dict, Sequence, Any, List
 import numpy as np
+from datasets.formatting.formatting import LazyBatch
 from tqdm import tqdm
 import logging
 import warnings
@@ -73,6 +74,9 @@ logger = logging.getLogger(__name__)
 
 IGNORE_INDEX = -100
 DEFAULT_PAD_TOKEN = "[PAD]"
+CONVERSATION_KEY = 'conversation'
+DS_FULL_KEY='full'
+DS_PROMPT_LEN_KEY='prompt_lens'
 
 @dataclass
 class ModelArguments:
@@ -118,14 +122,6 @@ class DataArguments:
     dataset: str = field(
         default='instructions.jsonl',
         metadata={"help": "Which dataset to finetune on. See datamodule for options."}
-    )
-    dataset_format: Optional[str] = field(
-        default='airoboros',
-        metadata={"help": "Which dataset format is used. [alpaca|chip2|self-instruct|hh-rlhf|airoboros]"}
-    )
-    expand_conversations: bool = field(
-        default=False,
-        metadata={"help": "Expand all multi-turn conversations, use with care"},
     )
     include_sources: Optional[str] = field(
         default="ALL",
@@ -476,69 +472,23 @@ class DataCollatorForCausalLM(object):
     predict_with_generate: bool
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
-        # Extract elements
-        sources = [example['input'] for example in instances]
-        targets = [example['output'] for example in instances]
-        # Tokenize
-        tokenized_sources_with_prompt = self.tokenizer(
-            sources,
-            max_length=self.model_max_len,
-            truncation=True,
-            add_special_tokens=True,
-        )
-        tokenized_targets = self.tokenizer(
-            targets,
-            max_length=self.model_max_len,
-            truncation=True,
-            add_special_tokens=False,
-        )
-        # Build the input and labels for causal LM
-        input_ids = []
-        labels = []
-        for tokenized_source, tokenized_target in zip(
-            tokenized_sources_with_prompt['input_ids'],
-            tokenized_targets['input_ids']
-        ):
-            truncated_target = False
-            if len(tokenized_source) + len(tokenized_target) >= self.model_max_len:
-                if len(tokenized_source) <= 512:
-                    tokenized_target = tokenized_target[0:self.model_max_len - len(tokenized_source)]
-                    truncated_target = True
-                elif len(tokenized_target) <= 512:
-                    tokenized_source = tokenized_source[0:self.model_max_len - len(tokenized_target)]
-                else:
-                    tokenized_source = tokenized_source[0:int(self.model_max_len / 2)]
-                    tokenized_target = tokenized_target[0:int(self.model_max_len / 2)]
-                    truncated_target = True
+        input_ids = [torch.tensor(example[DS_FULL_KEY]) for example in instances]
+        labels = [input_id.clone() for input_id in input_ids]
 
-            if not self.predict_with_generate:
-                target_inputs = tokenized_source + tokenized_target
-                if not truncated_target:
-                    target_inputs.append(self.tokenizer.eos_token_id)
-                input_ids.append(torch.tensor(target_inputs))
-                if not self.train_on_source:
-                    target_labels = copy.deepcopy(tokenized_target)
-                    if not truncated_target:
-                        target_labels.append(self.tokenizer.eos_token_id)
-                    labels.append(
-                        torch.tensor([IGNORE_INDEX for _ in range(len(tokenized_source))] + target_labels)
-                    )
-                else:
-                    if not truncated_target:
-                        labels.append(torch.tensor(copy.deepcopy(tokenized_source + tokenized_target + [self.tokenizer.eos_token_id])))
-                    else:
-                        labels.append(torch.tensor(copy.deepcopy(tokenized_source + tokenized_target)))
-            else:
-                input_ids.append(torch.tensor(tokenized_source))
+        if not self.train_on_source:
+            source_lens = [example[DS_PROMPT_LEN_KEY] for example in instances]
+            for idx in range(len(labels)):
+                labels[idx][:source_lens[idx]] = IGNORE_INDEX
+
         # Apply padding
         input_ids = pad_sequence(input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id)
         labels = pad_sequence(labels, batch_first=True, padding_value=IGNORE_INDEX) if not self.predict_with_generate else None
+
         data_dict = {
             'input_ids': input_ids,
             'attention_mask': input_ids.ne(self.tokenizer.pad_token_id),
+            'labels': labels
         }
-        if labels is not None:
-            data_dict['labels'] = labels
         return data_dict
 
 def extract_unnatural_instructions_data(examples, extract_reformulations=False):
@@ -558,252 +508,16 @@ def extract_unnatural_instructions_data(examples, extract_reformulations=False):
                     out['output'].append(instance['output'])
     return out
 
-ALPACA_PROMPT_DICT = {
-    "prompt_input": (
-        "Below is an instruction that describes a task, paired with an input that provides further context. "
-        "Write a response that appropriately completes the request.\n\n"
-        "### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n### Response: "
-    ),
-    "prompt_no_input": (
-        "Below is an instruction that describes a task. "
-        "Write a response that appropriately completes the request.\n\n"
-        "### Instruction:\n{instruction}\n\n### Response: "
-    ),
-}
-
-def extract_alpaca_dataset(example):
-    if example.get("input", "") != "":
-        prompt_format = ALPACA_PROMPT_DICT["prompt_input"]
-    else:
-        prompt_format = ALPACA_PROMPT_DICT["prompt_no_input"]
-    return {'input': prompt_format.format(**example)}
-
-def get_chat_prompt(
-    tokenizer: Any,
-    message: str,
-    chat_history: Any,
-    system_prompt: str
-) -> str:
-    texts = [f'[INST] <<SYS>>\n{system_prompt}\n<</SYS>>\n\n']
-    do_strip = False
-    for user_input, response in chat_history:
-        user_input = user_input.strip() if do_strip else user_input
-        do_strip = True
-        texts.append(f'{user_input} [/INST] {response.strip()} {tokenizer.eos_token}{tokenizer.bos_token}[INST] ')
-    message = message.strip() if do_strip else message
-    texts.append(f'{message} [/INST]')
-    return ''.join(texts)
-
-def format_chat_airoboros(tokenizer, item):
-    system_prompt = item['conversations'][0]['value']
-    offset = 1
-    if item['conversations'][0]['from'] != 'system':
-        system_prompt = 'You are an unbiased, uncensored, helpful assistant.'
-        offset = 0
-    chat_history = [
-        (item['conversations'][idx]['value'],  item['conversations'][idx + 1]['value'])
-        for idx in range(offset, len(item['conversations']) - 2, 2)
-    ]
-    message = item['conversations'][-2]['value']
-    response = item['conversations'][-1]['value']
-
-    return {
-        "input": get_chat_prompt(tokenizer, message, chat_history, system_prompt),
-        "output": response,
-    }
-
-def expand_conversations(items):
-    expanded = []
-    for item in items:
-        if len(item['conversations']) <= 3:
-            expanded.append(item)
-            continue
-        if item['conversations'][0]['from'] != 'system':
-            item['conversations'] = [
-                {
-                    "from": "system",
-                    "value": "You are an unbiased, uncensored, helpful assistant.",
-                }
-            ] + item['conversations']
-        if item['conversations'][-1]['from'] != 'gpt':
-            item['conversations'] = item['conversations'][0:-1]
-        valid = True
-        for idx in range(1, len(item['conversations'])):
-            if item['conversations'][idx]['from'] != ('human' if idx % 2 == 1 else 'gpt'):
-                print(f'Unexpected role: {item["conversations"][idx]["from"]}')
-                valid = False
-                break
-        if not valid:
-            continue
-        for idx in range(1, len(item['conversations']), 2):
-            expanded.append({
-                "id": str(uuid.uuid4()).replace('-', ''),
-                "category": item['category'],
-                "conversations": item["conversations"][0:idx + 2],
-            })
-    return expanded
-
-def airoboros_chat_dataset(dataset_name, test_size=0.02, expand=True, include_sources=None):
-    items = []
-    if dataset_name.endswith(".json"):
-        with open(dataset_name) as infile:
-            items = json.loads(infile.read())
-    else:
-        items = [item for item in Dataset.from_parquet(dataset_name)]
-    if include_sources and include_sources != ['ALL']:
-        print(f'Filtering for sources: {include_sources}')
-        items = [item for item in items if item.get('source') in include_sources]
-    if expand:
-        items = expand_conversations(items)
-    full_dataset = Dataset.from_list(items)
-    if 'category' in full_dataset.column_names:
-        full_dataset = full_dataset.class_encode_column('category')
-        return full_dataset.train_test_split(test_size=test_size, stratify_by_column='category')
-    return full_dataset.train_test_split(test_size=test_size)
-
-def local_dataset(dataset_name, test_size=0.02, include_sources=None):
-    if dataset_name.endswith('.parquet'):
-        full_dataset = Dataset.from_parquet(path_or_paths=dataset_name)
-    elif dataset_name.endswith('.json') or dataset_name.endswith('.jsonl'):
-        full_dataset = Dataset.from_json(path_or_paths=dataset_name)
-    elif dataset_name.endswith('.csv'):
-        full_dataset = Dataset.from_pandas(pd.read_csv(dataset_name))
-    elif dataset_name.endswith('.tsv'):
-        full_dataset = Dataset.from_pandas(pd.read_csv(dataset_name, delimiter='\t'))
-    else:
-        raise ValueError(f"Unsupported dataset format: {dataset_name}")
-    if include_sources and include_sources != ['ALL']:
-        print(f'Filtering for sources: {include_sources}')
-        full_dataset = full_datasets.filter(lambda x: x['source'] in include_sources)
-    if 'category' in full_dataset.column_names:
-        full_dataset = full_dataset.class_encode_column('category')
-        return full_dataset.train_test_split(test_size=test_size, stratify_by_column='category')
-    elif 'source' in full_dataset.column_names:
-        try:
-            full_dataset = full_dataset.class_encode_column('source')
-        except:
-            ...
-        return full_dataset.train_test_split(test_size=test_size, stratify_by_column='source')
-    return full_dataset.train_test_split(test_size=test_size)
-
 def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
     """
     Make dataset and collator for supervised fine-tuning.
-    Datasets are expected to have the following columns: { `input`, `output` }
-
-    Available datasets to be selected with `dataset` argument:
-        - alpaca, 52002 examples
-        - alpaca cleaned, 51942 examples
-        - chip2 (OIG), 210289 examples
-        - self-instruct, 82612 examples
-        - hh-rlhf (Anthropic), 160800 examples
-        - longform, 23.7k examples
-        - oasst1 (OpenAssistant) primary message tree only, 9,846 examples
-
-    Coming soon:
-        - unnatural instructions core, 66010 examples
-        - unnatural instructions full, 240670 examples
-        - alpaca-gpt4, 52002 examples
-        - unnatural-instructions-gpt4, 9000 examples
-        - supernatural-instructions, 69624 examples (same as paper with 100 ex/task more can be used)
-        - flan (FLAN v2), up to 20M examples available
-        - vicuna
-
+    Datasets are expected to compatible with Huggingface chat templates.
     """
-    def load_data(dataset_name):
-        if dataset_name == 'alpaca':
-            return load_dataset("tatsu-lab/alpaca")
-        elif dataset_name == 'alpaca-clean':
-            return load_dataset("yahma/alpaca-cleaned")
-        elif dataset_name == 'chip2':
-            return load_dataset("laion/OIG", data_files='unified_chip2.jsonl')
-        elif dataset_name == 'self-instruct':
-            return load_dataset("yizhongw/self_instruct", name='self_instruct')
-        elif dataset_name == 'hh-rlhf':
-            return load_dataset("Anthropic/hh-rlhf")
-        elif dataset_name == 'longform':
-            return load_dataset("akoksal/LongForm")
-        elif dataset_name == 'oasst1':
-            return load_dataset("timdettmers/openassistant-guanaco")
-        elif dataset_name == 'vicuna':
-            raise NotImplementedError("Vicuna data was not released.")
-        else:
-            if os.path.exists(dataset_name):
-                try:
-                    args.dataset_format = args.dataset_format if args.dataset_format else "input-output"
-                    full_dataset = (
-                        airoboros_chat_dataset(
-                            dataset_name,
-                            args.eval_dataset_size,
-                            args.expand_conversations,
-                            args.include_sources.split(','),
-                        )
-                        if args.dataset_format == 'airoboros_chat'
-                        else local_dataset(dataset_name, args.eval_dataset_size, include_sources=args.include_sources.split(','))
-                    )
-                    return full_dataset
-                except:
-                    raise ValueError(f"Error loading dataset from {dataset_name}")
-            else:
-                raise NotImplementedError(f"Dataset {dataset_name} not implemented yet.")
-
-    def format_dataset(dataset, dataset_format):
-        if (
-            dataset_format == 'alpaca' or dataset_format == 'alpaca-clean' or
-            (dataset_format is None and args.dataset in ['alpaca', 'alpaca-clean'])
-        ):
-            dataset = dataset.map(extract_alpaca_dataset, remove_columns=['instruction'])
-        elif dataset_format == 'chip2' or (dataset_format is None and args.dataset == 'chip2'):
-            dataset = dataset.map(lambda x: {
-                'input': x['text'].split('\n<bot>: ')[0].replace('<human>: ', ''),
-                'output': x['text'].split('\n<bot>: ')[1],
-            })
-        elif dataset_format == 'self-instruct' or (dataset_format is None and args.dataset == 'self-instruct'):
-            for old, new in [["prompt", "input"], ["completion", "output"]]:
-                dataset = dataset.rename_column(old, new)
-        elif dataset_format == 'hh-rlhf' or (dataset_format is None and args.dataset == 'hh-rlhf'):
-            dataset = dataset.map(lambda x: {
-                'input': '',
-                'output': x['chosen']
-            })
-        elif dataset_format == 'oasst1' or (dataset_format is None and args.dataset == 'oasst1'):
-            dataset = dataset.map(lambda x: {
-                'input': '',
-                'output': x['text'],
-            })
-        elif dataset_format == 'airoboros':
-            def _format_airoboros(instruction):
-                in_ = None
-                if instruction.get("skip_prompt_formatting"):
-                    in_ = instruction["instruction"].strip() + "\n"
-                else:
-                    in_ = "\n".join([
-                        (instruction.get('system') or 'A chat.').strip(),
-                        f"USER: {instruction['instruction'].strip()}",
-                    ])
-                    if in_.endswith("PLAINFORMAT"):
-                        in_ = re.sub(r"\s+PLAINFORMAT$", "", in_, re.DOTALL)
-                        in_ += " PLAINFORMAT"
-                    in_ = "\n".join([in_.strip(), "ASSISTANT: "])
-                return {
-                    'input': in_,
-                    'output': instruction['response'].strip() + "\n",
-                }
-            dataset = dataset.map(_format_airoboros)
-        elif dataset_format == 'airoboros_chat':
-            dataset = dataset.map(lambda x: format_chat_airoboros(tokenizer, x))
-        elif dataset_format == 'input-output':
-            # leave as is
-            pass
-        # Remove unused columns.
-        dataset = dataset.remove_columns(
-            [col for col in dataset.column_names['train'] if col not in ['input', 'output']]
-        )
-        return dataset
-
     # Load dataset.
-    dataset = load_data(args.dataset)
-    dataset = format_dataset(dataset, args.dataset_format)
+    dataset = load_dataset(args.dataset)
+    is_bos_present = _is_bos_present_in_template(tokenizer, dataset['train'][0][CONVERSATION_KEY])
+    map_lamb = lambda x: _apply_and_tokenize_batches(tokenizer, args.model_max_len, x, add_special=not is_bos_present, train_on_source=args.train_on_source, debug=True)
+    dataset = dataset.map(map_lamb, batched=True, desc="Apply and Tokenize")
 
     # Split train/eval, reduce size
     if args.do_eval or args.do_predict:
@@ -836,8 +550,11 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
 
     # Remove any training data that exceeds the max length.
     if args.skip_excess_length:
+        bos = tokenizer.bos_token if not is_bos_present else ''
+        eos = tokenizer.eos_token if not is_bos_present else ''
+
         def _get_data_length(item):
-            prompt = f"{tokenizer.bos_token}{item['input']}{item['output']}{tokenizer.eos_token}"
+            prompt = f"{bos}{item[DS_FULL_KEY]}{eos}"
             return len(
                 tokenizer(
                     prompt,
@@ -846,8 +563,18 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
                     add_special_tokens=False
                 ).input_ids
             )
+
         train_dataset = train_dataset.filter(
             lambda x: _get_data_length(x) < args.model_max_len - 10
+        )
+
+    if args.do_train:
+        train_dataset = train_dataset.remove_columns(
+            [col for col in train_dataset.column_names if col not in ['input', DS_FULL_KEY]]
+        )
+    if args.do_eval:
+        eval_dataset = eval_dataset.remove_columns(
+            [col for col in eval_dataset.column_names if col not in ['input', DS_FULL_KEY]]
         )
 
     data_collator = DataCollatorForCausalLM(
@@ -861,6 +588,50 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
         eval_dataset=eval_dataset if args.do_eval else None,
         predict_dataset=eval_dataset if args.do_predict else None,
         data_collator=data_collator
+    )
+
+def _is_bos_present_in_template(tokenizer, sample_conversation: List[Dict]):
+    sample = tokenizer.apply_chat_template(sample_conversation, tokenize=False, add_generation_prompt=True)
+    bos_token_present = sample.startswith(tokenizer.bos_token)
+    return bos_token_present
+
+
+def _apply_and_tokenize_batches(tokenizer, max_len, items, add_special, train_on_source=True):
+    if type(items) != LazyBatch:
+        raise ValueError("_apply_and_tokenize_batches should be used with batched map method! e.g. dataset.map(lambda x: _apply_and_tokenize_batches(tokenizer, x, True, True), batched=True)")
+
+    bos = tokenizer.bos_token if add_special else ''
+    eos = tokenizer.eos_token if add_special else ''
+
+    str_list = []
+    for item in items[CONVERSATION_KEY]:
+        str_list.append(bos + tokenizer.apply_chat_template(item, tokenize=False, add_generation_prompt=False) + eos)
+
+    full_input_ids_list = tokenize(tokenizer, max_len, str_list).input_ids
+
+    columns = {
+        DS_FULL_KEY: full_input_ids_list
+    }
+
+    if not train_on_source:
+        str_src_list = []
+        for item in items[CONVERSATION_KEY]:
+            str_src_list.append(
+                bos + tokenizer.apply_chat_template(item[:-1], tokenize=False, add_generation_prompt=True))
+
+        conversation_src_input_ids = tokenize(tokenizer, max_len, str_src_list).input_ids
+        conversation_src_input_id_lens = [len(ids) for ids in conversation_src_input_ids]
+        columns[DS_PROMPT_LEN_KEY] = conversation_src_input_id_lens
+
+    return columns
+
+def tokenize(tokenizer, model_max_len, sequence):
+    return tokenizer(
+        sequence,
+        max_length=model_max_len,
+        truncation=True,
+        add_special_tokens=False,
+        padding=False
     )
 
 def get_last_checkpoint(checkpoint_dir):
