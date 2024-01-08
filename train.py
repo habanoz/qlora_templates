@@ -228,7 +228,7 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
     max_shard_size: str = field(default="5GB", metadata={"help": "Max shard size when saving model after full finetune."})
     save_quantized_base: bool = field(default=False, metadata={"help": "Optionally save the quantized base model"})
     # attn_implementation: str = field(default=None, metadata={"help": "Attention implementation."})
-    flash_attention_2: bool = field(default=False, metadata={"help": "Use flash attention 2."})
+    use_flash_attention_2: bool = field(default=False, metadata={"help": "Use flash attention 2."})
     neftune_noise_alpha: int = field(default=5, metadata={"help": "NEFTune noise alpha value"})
 
 @dataclass
@@ -378,7 +378,7 @@ def get_accelerate_model(args, checkpoint_dir):
         torch_dtype=(torch.float32 if args.fp16 else (torch.bfloat16 if args.bf16 else torch.float32)),
         trust_remote_code=args.trust_remote_code,
         #attn_implementation=args.attn_implementation,
-        flash_attention_2=args.flash_attention_2,
+        use_flash_attention_2=args.use_flash_attention_2,
         **extra_model_args,
     )
     if compute_dtype == torch.float16 and args.bits == 4:
