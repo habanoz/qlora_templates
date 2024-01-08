@@ -1,10 +1,16 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
-import copy
-import json
 import os
-import re
-import uuid
+
+try:
+    print("Installing flash attention!")
+    os.system("pip install flash-attn --no-build-isolation --upgrade --quiet")
+    print("Installing flash attention completed!")
+except Exception as exc:
+    print("WARN: flash-attn failed to install. This is OK if you have not enabled flash-attention-2 option.")
+
+
+import json
 import shutil
 from os.path import exists, join, isdir
 from dataclasses import dataclass, field
@@ -15,7 +21,6 @@ from tqdm import tqdm
 import logging
 import warnings
 import bitsandbytes as bnb
-import pandas as pd
 import importlib
 from packaging import version
 import torch
@@ -23,20 +28,17 @@ import transformers
 from torch.nn.utils.rnn import pad_sequence
 import argparse
 from transformers import (
-    AddedToken,
     AutoTokenizer,
     AutoModelForCausalLM,
     set_seed,
     Seq2SeqTrainer,
-    BitsAndBytesConfig,
-    LlamaTokenizer,
+    BitsAndBytesConfig
 )
-from datasets import load_dataset, Dataset
+from datasets import load_dataset
 import evaluate
 
 from peft import (
     prepare_model_for_kbit_training,
-    AutoPeftModelForCausalLM,
     LoraConfig,
     get_peft_model,
     PeftModel
@@ -44,6 +46,8 @@ from peft import (
 from peft.tuners.lora import LoraLayer
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 from accelerate import Accelerator
+
+from utils import load_template
 
 def is_ipex_available():
     def get_major_and_minor_from_version(full_version):
@@ -81,7 +85,7 @@ DS_PROMPT_LEN_KEY='prompt_lens'
 @dataclass
 class ModelArguments:
     model_name_or_path: Optional[str] = field(
-        default="meta-llama/Llama-2-7b",
+        default="TinyLlama/TinyLlama-1.1B-intermediate-step-1195k-token-2.5T",
     )
     trust_remote_code: Optional[bool] = field(
         default=False,
@@ -120,7 +124,7 @@ class DataArguments:
         metadata={"help": "Purge dataset items that exceed model_max_len"}
     )
     dataset: str = field(
-        default='instructions.jsonl',
+        default='habanoz/airoboros-3.1-no-mathjson-max-1k-chat-format',
         metadata={"help": "Which dataset to finetune on. See datamodule for options."}
     )
     include_sources: Optional[str] = field(
@@ -194,7 +198,7 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
         metadata={"help": "Free memory per gpu."}
     )
     report_to: str = field(
-        default='none',
+        default='tensorboard',
         metadata={"help": "To use wandb or something else for reporting."}
     )
     use_fast_tokenizer: bool = field(default=True, metadata={"help": "Use fast tokenizer"})
@@ -205,7 +209,7 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
     padding_side: str = field(default="right", metadata={"help": "tokenizer padding side"})
     final_output_dir: str = field(default='./final', metadata={"help": 'The final output directory, for completed model'})
     output_dir: str = field(default='./output', metadata={"help": 'The output (and intermediate) directory.'})
-    optim: str = field(default='paged_adamw_32bit', metadata={"help": 'The optimizer to be used'})
+    optim: str = field(default='adamw_apex_fused', metadata={"help": 'The optimizer to be used'})
     per_device_train_batch_size: int = field(default=1, metadata={"help": 'The training batch size per GPU. Increase for better speed.'})
     per_device_eval_batch_size: int = field(default=1, metadata={"help": 'The eval batch size per GPU. Increase for better speed.'})
     gradient_accumulation_steps: int = field(default=16, metadata={"help": 'How many gradients to accumulate before to perform an optimizer step'})
@@ -220,9 +224,9 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
     warmup_ratio: float = field(default=0.03, metadata={"help": 'Fraction of steps to do a warmup for'})
     logging_steps: int = field(default=10, metadata={"help": 'The frequency of update steps after which to log the loss'})
     group_by_length: bool = field(default=False, metadata={"help": 'Group sequences into batches with same length. Saves memory and speeds up training considerably.'})
-    save_strategy: str = field(default='steps', metadata={"help": 'When to save checkpoints'})
+    save_strategy: str = field(default='epoch', metadata={"help": 'When to save checkpoints'})
     save_steps: int = field(default=250, metadata={"help": 'How often to save a model'})
-    save_total_limit: int = field(default=40, metadata={"help": 'How many checkpoints to save before the oldest is overwritten'})
+    save_total_limit: int = field(default=1, metadata={"help": 'How many checkpoints to save before the oldest is overwritten'})
     deepspeed: str = field(default=None, metadata={"help": "deepspeed configuration path"})
     using_fsdp: bool = field(default=False, metadata={"help": "Flag indicating whether or not you are using FSDP (via accelerate)"})
     max_shard_size: str = field(default="5GB", metadata={"help": "Max shard size when saving model after full finetune."})
@@ -354,6 +358,8 @@ def get_accelerate_model(args, checkpoint_dir):
     if "qwen" in args.model_name_or_path:
         extra_model_args["bf16"] = True
         extra_model_args["use_flash_attn"] = True
+
+    load_template(tokenizer)
 
     # Model...
     print(f'loading base model {args.model_name_or_path}...')
@@ -541,13 +547,13 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
             eval_dataset = dataset['test']
         if args.max_eval_samples is not None and len(eval_dataset) > args.max_eval_samples:
             eval_dataset = eval_dataset.select(range(args.max_eval_samples))
-        if args.group_by_length:
+        if args.group_by_length: # not supported. Let it fail for the time being...
             eval_dataset = eval_dataset.map(lambda x: {'length': len(x['input']) + len(x['output'])})
     if args.do_train:
         train_dataset = dataset['train']
         if args.max_train_samples is not None and len(train_dataset) > args.max_train_samples:
             train_dataset = train_dataset.select(range(args.max_train_samples))
-        if args.group_by_length:
+        if args.group_by_length: # not supported. Let it fail for the time being...
             train_dataset = train_dataset.map(lambda x: {'length': len(x['input']) + len(x['output'])})
 
     # Remove any training data that exceeds the max length.
@@ -775,6 +781,7 @@ def train():
         trainer.save_metrics("train", metrics)
         trainer.save_state()
         all_metrics.update(metrics)
+        trainer.save_model(args.output_dir)
     # Evaluation
     if args.do_eval:
         logger.info("*** Evaluate ***")
@@ -807,6 +814,11 @@ def train():
         os.makedirs(args.output_dir, exist_ok=True)
         with open(os.path.join(args.output_dir, "metrics.json"), "w") as fout:
             fout.write(json.dumps(all_metrics))
+
+    if args.do_train or args.do_eval:
+        # add specify dataset name add eval loss.
+        trainer.push_to_hub(commit_message="Model card update.", dataset=args.dataset)
+
 
     # Safely save final full-tune model.
     if args.full_finetune:
