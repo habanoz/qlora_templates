@@ -197,7 +197,7 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
         default='none',
         metadata={"help": "To use wandb or something else for reporting."}
     )
-    use_fast_tokenizer: bool = field(default=False, metadata={"help": "Use fast tokenizer"})
+    use_fast_tokenizer: bool = field(default=True, metadata={"help": "Use fast tokenizer"})
     pad_token: str = field(default=None, metadata={"help": "Custom pad token, e.g. for qwen"})
     eos_token: str = field(default=None, metadata={"help": "Custom EOS token, e.g. for qwen"})
     bos_token: str = field(default=None, metadata={"help": "Custom BOS token, e.g. for qwen"})
@@ -570,11 +570,11 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
 
     if args.do_train:
         train_dataset = train_dataset.remove_columns(
-            [col for col in train_dataset.column_names if col not in ['input', DS_FULL_KEY]]
+            [col for col in train_dataset.column_names if col not in [DS_PROMPT_LEN_KEY, DS_FULL_KEY]]
         )
     if args.do_eval:
         eval_dataset = eval_dataset.remove_columns(
-            [col for col in eval_dataset.column_names if col not in ['input', DS_FULL_KEY]]
+            [col for col in eval_dataset.column_names if col not in [DS_PROMPT_LEN_KEY, DS_FULL_KEY]]
         )
 
     data_collator = DataCollatorForCausalLM(
