@@ -1,30 +1,18 @@
 # Overview
 
-This is a fork of [QLoRA](https://github.com/artidoro/qlora)
+This is a fork of :
+- [artidoro/qlora](https://github.com/artidoro/qlora)
+- [jondurbin/qlora](https://github.com/jondurbin/qlora)
 
 ## Differences from original
 
-Since I am the creator of the various airoboros models, this fork is made specifically for airoboros, and does slightly differ from the main upstream repo.
+### HuggingFace Chat Templates
 
-### airoboros chat support
-
-airoboros datasets starting from 3.0 onwards are using conversational style datasets (e.g. sharegpt)
-
-Add `--dataset_format airoboros_chat`
-
-__*This uses llama-2 chat prompt format!*__
-
-### legacy airoboros support
-
-__*For versions 2.2.1 and earlier*__
-
-The instructions.jsonl file (or whatever filename you are using), should be a single JSON string per line, newline separated, with "instruction" and "response" values.
-
-Add: `--dataset_format airoboros`
+Dataset format option is removed. Only datasets that are compatible with Huggingface chat templates are accepted. For more info about chat templates see [Chat Templates](https://huggingface.co/docs/transformers/chat_templating)
 
 ### epochs instead of steps
 
-I prefer using a fixed number of epochs in training rather than trying to stop are a particular step count.  I removed the `--max_steps` parameter in favor of `--num_train_epochs` (which I usually set to 3)
+This modification comes from jondurbin/qlora. `--max_steps` parameter is removed in favor of `--num_train_epochs` (defaults to 3)
 
 ## Full, non-(q)lora fine-tune example
 
@@ -143,14 +131,3 @@ accelerate launch $BASE_DIR/qlora/train.py \
   --use_flash_attention_2 \
   --ddp_find_unused_parameters False
 ```
-
-## Requirements for the old, llama-1 models
-
-For the original llama models (not llama-2), I was using one of these:
-
-- https://huggingface.co/decapoda-research/llama-7b-hf
-- https://huggingface.co/decapoda-research/llama-13b-hf
-- https://huggingface.co/decapoda-research/llama-30b-hf
-- https://huggingface.co/decapoda-research/llama-65b-hf
-
-I replaced `special_tokens_map.json` and `tokenizer_config.json` within the base models with the versions found in llama-1-patch in this repo.
