@@ -2,12 +2,15 @@
 # LICENSE file in the root directory of this source tree.
 import os
 
-try:
-    print("Installing flash attention!")
-    os.system("pip install flash-attn --no-build-isolation --upgrade --quiet")
-    print("Installing flash attention completed!")
-except Exception as exc:
-    print("WARN: flash-attn failed to install. This is OK if you have not enabled flash-attention-2 option.")
+def install_flash_attn():
+    try:
+        print("Installing flash attention!")
+        os.system("pip install flash-attn --no-build-isolation --upgrade --quiet")
+        print("Installing flash attention completed!")
+    except Exception as exc:
+        print("WARN: flash-attn failed to install. It is OK if you have not enabled flash-attention-2 option.")
+
+# install_flash_attn()
 
 
 import json
