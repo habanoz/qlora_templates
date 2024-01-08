@@ -516,7 +516,7 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
     # Load dataset.
     dataset = load_dataset(args.dataset)
     is_bos_present = _is_bos_present_in_template(tokenizer, dataset['train'][0][CONVERSATION_KEY])
-    map_lamb = lambda x: _apply_and_tokenize_batches(tokenizer, args.model_max_len, x, add_special=not is_bos_present, train_on_source=args.train_on_source, debug=True)
+    map_lamb = lambda x: _apply_and_tokenize_batches(tokenizer, args.model_max_len, x, add_special=not is_bos_present, train_on_source=args.train_on_source)
     dataset = dataset.map(map_lamb, batched=True, desc="Apply and Tokenize")
 
     # Split train/eval, reduce size
