@@ -821,23 +821,13 @@ def train():
 
     if args.do_train or args.do_eval:
         if args.do_train:
-            card = ModelCard.load(f"{args.output_dir}/README.md")
-            card.data.library_name = "transformers" if args.full_finetune else "peft"
-            card.data.pipeline_tag = "text-generation"
-
-            card.save(f"{args.output_dir}/README.md")
-
-            card.content += """
-
-            ### Training Repository
-
-            [https://github.com/habanoz/qlora_templates](https://github.com/habanoz/qlora_templates)
-            """
-            
             # Save training arguements
-            with open('training_args.json', 'w') as f:
-                json.dump(vars(args), f, indent=4)
-
+            with open(f"{args.output_dir}/training_args.json", 'w') as f:
+                args_dict = vars(args)
+                args_dict.pop('generation_config')
+                args_dict.pop('distributed_state')
+                args_dict.pop('__cached__setup_devices')
+                json.dump(args_dict, f, indent=4)
 
         # add specify dataset name add eval loss.
         trainer.push_to_hub(commit_message="Model card update.", dataset=args.dataset)
