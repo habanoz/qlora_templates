@@ -618,7 +618,7 @@ def _apply_and_tokenize_batches(tokenizer, max_len, items, add_special, chat_tem
 
     str_list = []
     for item in items[CONVERSATION_KEY]:
-        str_list.append(bos + tokenizer.apply_chat_template(item, tokenize=False, add_generation_prompt=False, chat_template = chat_template) + eos)
+        str_list.append(bos + tokenizer.apply_chat_template(item, tokenize=False, add_generation_prompt=False) + eos, chat_template = chat_template)
 
     full_input_ids_list = tokenize(tokenizer, max_len, str_list).input_ids
 
@@ -629,7 +629,8 @@ def _apply_and_tokenize_batches(tokenizer, max_len, items, add_special, chat_tem
     if not train_on_source:
         str_src_list = []
         for item in items[CONVERSATION_KEY]:
-            str_src_list.append(bos + tokenizer.apply_chat_template(item[:-1], tokenize=False, add_generation_prompt=True, chat_template = chat_template))
+            str_src_list.append(
+                bos + tokenizer.apply_chat_template(item[:-1], tokenize=False, add_generation_prompt=True), chat_template = chat_template)
 
         conversation_src_input_ids = tokenize(tokenizer, max_len, str_src_list).input_ids
         conversation_src_input_id_lens = [len(ids) for ids in conversation_src_input_ids]
