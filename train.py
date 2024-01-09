@@ -49,6 +49,7 @@ from peft import (
 from peft.tuners.lora import LoraLayer
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 from accelerate import Accelerator
+from huggingface_hub import ModelCard
 
 from utils import load_template
 
@@ -819,6 +820,25 @@ def train():
             fout.write(json.dumps(all_metrics))
 
     if args.do_train or args.do_eval:
+        if args.do_train:
+            card = ModelCard.load(f"{args.output_dir}/README.md")
+            card.data.library_name = "transformers" if args.full_finetune else "peft"
+            card.data.pipeline_tag = "text-generation"
+
+            card.save(f"{args.output_dir}/README.md")
+
+            card.content += """
+
+            ### Training Repository
+
+            [https://github.com/habanoz/qlora_templates](https://github.com/habanoz/qlora_templates)
+            """
+            
+            # Save training arguements
+            with open('training_args.json', 'w') as f:
+                json.dump(vars(args), f, indent=4)
+
+
         # add specify dataset name add eval loss.
         trainer.push_to_hub(commit_message="Model card update.", dataset=args.dataset)
 
