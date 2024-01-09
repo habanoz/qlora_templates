@@ -50,7 +50,7 @@ from peft.tuners.lora import LoraLayer
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 from accelerate import Accelerator
 
-from utils import load_template
+from utils import get_template, load_template
 
 def is_ipex_available():
     def get_major_and_minor_from_version(full_version):
@@ -362,7 +362,7 @@ def get_accelerate_model(args, checkpoint_dir):
         extra_model_args["bf16"] = True
         extra_model_args["use_flash_attn"] = True
 
-    load_template(tokenizer)
+    # load_template(tokenizer)
 
     # Model...
     print(f'loading base model {args.model_name_or_path}...')
@@ -526,8 +526,10 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
     """
     # Load dataset.
     dataset = load_dataset(args.dataset)
-    is_bos_present = _is_bos_present_in_template(tokenizer, dataset['train'][0][CONVERSATION_KEY])
-    map_lamb = lambda x: _apply_and_tokenize_batches(tokenizer, args.model_max_len, x, add_special=not is_bos_present, train_on_source=args.train_on_source)
+    chat_template =  get_template()
+
+    is_bos_present = _is_bos_present_in_template(tokenizer, dataset['train'][0][CONVERSATION_KEY], chat_template)
+    map_lamb = lambda x: _apply_and_tokenize_batches(tokenizer, args.model_max_len, x, add_special=not is_bos_present, chat_template = chat_template, train_on_source=args.train_on_source)
     dataset = dataset.map(map_lamb, batched=True, desc="Apply and Tokenize")
 
     # Split train/eval, reduce size
@@ -601,13 +603,13 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
         data_collator=data_collator
     )
 
-def _is_bos_present_in_template(tokenizer, sample_conversation: List[Dict]):
-    sample = tokenizer.apply_chat_template(sample_conversation, tokenize=False, add_generation_prompt=True)
+def _is_bos_present_in_template(tokenizer, sample_conversation: List[Dict], chat_template):
+    sample = tokenizer.apply_chat_template(sample_conversation, tokenize=False, add_generation_prompt=True, chat_template=chat_template)
     bos_token_present = sample.startswith(tokenizer.bos_token)
     return bos_token_present
 
 
-def _apply_and_tokenize_batches(tokenizer, max_len, items, add_special, train_on_source=True):
+def _apply_and_tokenize_batches(tokenizer, max_len, items, add_special, chat_template, train_on_source=True):
     if type(items) != LazyBatch:
         raise ValueError("_apply_and_tokenize_batches should be used with batched map method! e.g. dataset.map(lambda x: _apply_and_tokenize_batches(tokenizer, x, True, True), batched=True)")
 
@@ -616,7 +618,7 @@ def _apply_and_tokenize_batches(tokenizer, max_len, items, add_special, train_on
 
     str_list = []
     for item in items[CONVERSATION_KEY]:
-        str_list.append(bos + tokenizer.apply_chat_template(item, tokenize=False, add_generation_prompt=False) + eos)
+        str_list.append(bos + tokenizer.apply_chat_template(item, tokenize=False, add_generation_prompt=False) + eos, chat_template = chat_template)
 
     full_input_ids_list = tokenize(tokenizer, max_len, str_list).input_ids
 
@@ -628,7 +630,7 @@ def _apply_and_tokenize_batches(tokenizer, max_len, items, add_special, train_on
         str_src_list = []
         for item in items[CONVERSATION_KEY]:
             str_src_list.append(
-                bos + tokenizer.apply_chat_template(item[:-1], tokenize=False, add_generation_prompt=True))
+                bos + tokenizer.apply_chat_template(item[:-1], tokenize=False, add_generation_prompt=True), chat_template = chat_template)
 
         conversation_src_input_ids = tokenize(tokenizer, max_len, str_src_list).input_ids
         conversation_src_input_id_lens = [len(ids) for ids in conversation_src_input_ids]
